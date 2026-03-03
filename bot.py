@@ -320,3 +320,14 @@ async def adicionar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Usa a primeira conta para coletar membros
         cliente_principal<response clipped><NOTE>Result is longer than **10000 characters**, will be **truncated**.</NOTE>
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("adicionar", adicionar))
+    app.add_handler(conv_handler)
+    
+    print("Bot rodando...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main() 
