@@ -1,5 +1,6 @@
 import asyncio
 import os
+import json
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 from telethon import TelegramClient, errors
@@ -9,18 +10,35 @@ from telethon.tl.types import Channel, Chat
 
 # ======= CONFIGURAÇÕES =======
 BOT_TOKEN = "7146425074:AAHf2EhXs2dO6jaiDrnl3F6qnc70Rg_GhZ0"
-API_ID = 20305448
-API_HASH = "2d9ee612f8ece128cd4bd78b2e71d01e"
-PHONE = "+5522981528428"
 OWNER_ID = 8002161328
 INTERVALO_ADICAO = 20
+
+# Configuração de múltiplas contas (adicione quantas quiser)
+CONTAS_CONFIG = [
+    {
+        "nome": "conta1",
+        "api_id": 20305448,
+        "api_hash": "2d9ee612f8ece128cd4bd78b2e71d01e",
+        "phone": "+5522981528428"
+    },
+    # Adicione mais contas aqui:
+    # {
+    #     "nome": "conta2",
+    #     "api_id": SEU_API_ID_2,
+    #     "api_hash": "SEU_API_HASH_2",
+    #     "phone": "+SEU_NUMERO_2"
+    # },
+]
 # =============================
 
 os.makedirs("sessions", exist_ok=True)
-AGUARDANDO_CODIGO, AGUARDANDO_SENHA = range(2)
 
-# Cliente Telethon - sem loop manual
-client = TelegramClient("sessions/user_session", API_ID, API_HASH)
+# Estados da conversação
+AGUARDANDO_CONTA, AGUARDANDO_CODIGO, AGUARDANDO_SENHA = range(3)
+
+# Dicionário para armazenar os clientes Telethon ativos
+clientes = {}
+conta_atual = {}  # Para rastrear qual conta está sendo logada
 
 def apenas_dono(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -30,162 +48,275 @@ def apenas_dono(func):
         return await func(update, context)
     return wrapper
 
+def get_teclado_contas():
+    """Retorna string com lista de contas disponíveis"""
+    if not CONTAS_CONFIG:
+        return "Nenhuma conta configurada."
+
+    texto = "📱 Contas disponíveis:
+"
+    for i, conta in enumerate(CONTAS_CONFIG, 1):
+        status = "🟢" if conta["nome"] in clientes else "🔴"
+        texto += f"{i}. {status} {conta['nome']} ({conta['phone']})
+"
+    return texto
+
 @apenas_dono
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Olá! Comandos disponíveis:\n"
-        "/login — Autenticar sua conta Telegram\n"
-        "/adicionar @origem @destino — Transferir membros\n"
-        "/status — Ver se está autenticado"
+        "👋 Olá! Comandos disponíveis:
+"
+        "/contas — Ver contas configuradas e status
+"
+        "/login <nome_conta> — Autenticar uma conta específica
+"
+        "/login_todas — Autenticar todas as contas
+"
+        "/adicionar @origem @destino — Transferir membros usando todas as contas
+"
+        "/status — Ver status das contas
+"
+        "/parar <nome_conta> — Desconectar uma conta
+
+"
+        f"{get_teclado_contas()}"
     )
 
 @apenas_dono
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if client.is_connected():
-            autenticado = await client.is_user_authorized()
-            if autenticado:
-                await update.message.reply_text("✅ Conta autenticada e pronta para uso.")
-            else:
-                await update.message.reply_text("❌ Conectado mas não autenticado. Use /login.")
+async def contas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lista todas as contas e seus status"""
+    texto = "📱 **Status das Contas**
+
+"
+
+    for conta in CONTAS_CONFIG:
+        nome = conta["nome"]
+        telefone = conta["phone"]
+
+        if nome in clientes:
+            cliente = clientes[nome]
+            try:
+                if cliente.is_connected():
+                    autenticado = await cliente.is_user_authorized()
+                    status = "🟢 Conectado" if autenticado else "🟡 Conectado (não autenticado)"
+                else:
+                    status = "🔴 Desconectado"
+            except:
+                status = "🔴 Erro"
         else:
-            await update.message.reply_text("❌ Não conectado. Use /login primeiro.")
-    except Exception as e:
-        await update.message.reply_text(f"Erro ao verificar status: {e}")
+            status = "🔴 Não iniciado"
+
+        texto += f"**{nome}** ({telefone}): {status}
+"
+
+    await update.message.reply_text(texto, parse_mode="Markdown")
+
+@apenas_dono
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Verifica status de todas as contas"""
+    await contas(update, context)
 
 @apenas_dono
 async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inicia login em uma conta específica"""
+    global conta_atual
+
+    if not context.args:
+        await update.message.reply_text(
+            "Uso: /login <nome_conta>
+
+"
+            f"{get_teclado_contas()}"
+        )
+        return ConversationHandler.END
+
+    nome_conta = context.args[0]
+
+    # Procura a configuração da conta
+    conta_config = None
+    for conta in CONTAS_CONFIG:
+        if conta["nome"] == nome_conta:
+            conta_config = conta
+            break
+
+    if not conta_config:
+        await update.message.reply_text(f"❌ Conta '{nome_conta}' não encontrada.")
+        return ConversationHandler.END
+
+    # Cria o cliente se não existir
+    if nome_conta not in clientes:
+        session_path = f"sessions/{nome_conta}"
+        clientes[nome_conta] = TelegramClient(
+            session_path, 
+            conta_config["api_id"], 
+            conta_config["api_hash"]
+        )
+
+    cliente = clientes[nome_conta]
+
     try:
-        if not client.is_connected():
-            await client.connect()
-        
-        autenticado = await client.is_user_authorized()
+        if not cliente.is_connected():
+            await cliente.connect()
+
+        autenticado = await cliente.is_user_authorized()
         if autenticado:
-            await update.message.reply_text("✅ Você já está autenticado!")
+            await update.message.reply_text(f"✅ Conta '{nome_conta}' já está autenticada!")
             return ConversationHandler.END
-        
-        await client.send_code_request(PHONE)
-        await update.message.reply_text("📱 Código enviado para o seu Telegram. Digite o código:")
+
+        # Armazena qual conta está sendo logada
+        conta_atual[update.effective_user.id] = nome_conta
+
+        await cliente.send_code_request(conta_config["phone"])
+        await update.message.reply_text(
+            f"📱 Código enviado para {conta_config['phone']} (conta: {nome_conta}).
+"
+            "Digite o código:"
+        )
         return AGUARDANDO_CODIGO
+
     except Exception as e:
-        await update.message.reply_text(f"Erro ao iniciar login: {e}")
+        await update.message.reply_text(f"❌ Erro ao iniciar login: {e}")
         return ConversationHandler.END
 
 @apenas_dono
 async def receber_codigo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    codigo = update.message.text.strip()
-    try:
-        await client.sign_in(PHONE, codigo)
-        await update.message.reply_text("✅ Login realizado com sucesso!")
+    """Recebe o código de verificação"""
+    user_id = update.effective_user.id
+
+    if user_id not in conta_atual:
+        await update.message.reply_text("❌ Sessão de login expirada. Use /login novamente.")
         return ConversationHandler.END
+
+    nome_conta = conta_atual[user_id]
+    cliente = clientes[nome_conta]
+    conta_config = next(c for c in CONTAS_CONFIG if c["nome"] == nome_conta)
+
+    codigo = update.message.text.strip()
+
+    try:
+        await cliente.sign_in(conta_config["phone"], codigo)
+        await update.message.reply_text(f"✅ Login realizado com sucesso na conta '{nome_conta}'!")
+        del conta_atual[user_id]
+        return ConversationHandler.END
+
     except errors.SessionPasswordNeededError:
-        await update.message.reply_text("🔐 Sua conta tem verificação em duas etapas. Digite sua senha:")
+        await update.message.reply_text("🔐 Conta com 2FA. Digite a senha:")
         return AGUARDANDO_SENHA
+
     except Exception as e:
-        await update.message.reply_text(f"Erro ao confirmar código: {e}")
+        await update.message.reply_text(f"❌ Erro: {e}")
+        del conta_atual[user_id]
         return ConversationHandler.END
 
 @apenas_dono
 async def receber_senha(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Recebe a senha de 2FA"""
+    user_id = update.effective_user.id
+
+    if user_id not in conta_atual:
+        await update.message.reply_text("❌ Sessão expirada.")
+        return ConversationHandler.END
+
+    nome_conta = conta_atual[user_id]
+    cliente = clientes[nome_conta]
+
     senha = update.message.text.strip()
+
     try:
-        await client.sign_in(password=senha)
-        await update.message.reply_text("✅ Login realizado com sucesso!")
+        await cliente.sign_in(password=senha)
+        await update.message.reply_text(f"✅ Login com 2FA realizado na conta '{nome_conta}'!")
     except Exception as e:
-        await update.message.reply_text(f"Erro ao confirmar senha: {e}")
+        await update.message.reply_text(f"❌ Erro na senha: {e}")
+
+    del conta_atual[user_id]
     return ConversationHandler.END
 
 @apenas_dono
-async def adicionar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
-        await update.message.reply_text("Uso correto: /adicionar @grupo_origem @grupo_destino")
+async def login_todas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tenta conectar todas as contas já autenticadas (sem código)"""
+    resultados = []
+
+    for conta in CONTAS_CONFIG:
+        nome = conta["nome"]
+        try:
+            if nome not in clientes:
+                session_path = f"sessions/{nome}"
+                clientes[nome] = TelegramClient(
+                    session_path, 
+                    conta["api_id"], 
+                    conta["api_hash"]
+                )
+
+            cliente = clientes[nome]
+            if not cliente.is_connected():
+                await cliente.connect()
+
+            if await cliente.is_user_authorized():
+                resultados.append(f"✅ {nome}: Autenticada")
+            else:
+                resultados.append(f"⚠️ {nome}: Não autenticada (use /login {nome})")
+
+        except Exception as e:
+            resultados.append(f"❌ {nome}: Erro - {e}")
+
+    await update.message.reply_text("📊 Resultado:
+" + "
+".join(resultados))
+
+@apenas_dono
+async def parar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Desconecta uma conta específica"""
+    if not context.args:
+        await update.message.reply_text("Uso: /parar <nome_conta>")
         return
-    
+
+    nome_conta = context.args[0]
+
+    if nome_conta not in clientes:
+        await update.message.reply_text(f"❌ Conta '{nome_conta}' não está ativa.")
+        return
+
+    try:
+        cliente = clientes[nome_conta]
+        if cliente.is_connected():
+            await cliente.disconnect()
+        del clientes[nome_conta]
+        await update.message.reply_text(f"✅ Conta '{nome_conta}' desconectada.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erro ao desconectar: {e}")
+
+@apenas_dono
+async def adicionar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Adiciona membros usando todas as contas disponíveis (distribuição round-robin)"""
+
+    if len(context.args) < 2:
+        await update.message.reply_text("Uso: /adicionar @grupo_origem @grupo_destino")
+        return
+
     origem_id = context.args[0]
     destino_id = context.args[1]
-    
-    await update.message.reply_text(f"⏳ Iniciando coleta de membros de {origem_id}...")
-    
-    try:
-        if not client.is_connected():
-            await client.connect()
-        
-        autenticado = await client.is_user_authorized()
-        if not autenticado:
-            await update.message.reply_text("❌ Não autenticado. Use /login primeiro.")
-            return
-        
-        origem = await client.get_entity(origem_id)
-        destino = await client.get_entity(destino_id)
-        
-        membros = []
-        async for user in client.iter_participants(origem, aggressive=True):
-            if not user.bot and not user.deleted:
-                membros.append(user)
-        
-        await update.message.reply_text(f"✅ {len(membros)} membros coletados. Iniciando adição...")
-        
-        adicionados = 0
-        erros = 0
-        
-        for i, user in enumerate(membros):
-            try:
-                if isinstance(destino, Channel):
-                    await client(InviteToChannelRequest(destino, [user]))
-                elif hasattr(destino, 'participants'):  # Chat
-                    await client(AddChatUserRequest(destino.id, user, 10))
-                
-                adicionados += 1
-                
-                if adicionados % 5 == 0:
-                    await update.message.reply_text(f"➕ {adicionados} adicionados até agora...")
-                
-                await asyncio.sleep(INTERVALO_ADICAO)
-                
-            except Exception as e:
-                erros += 1
-                print(f"Erro ao adicionar {user.username or user.id}: {e}")
-        
-        await update.message.reply_text(
-            f"🏁 Concluído!\n"
-            f"✅ Adicionados: {adicionados}\n"
-            f"❌ Erros: {erros}"
-        )
-        
-    except Exception as e:
-        await update.message.reply_text(f"Erro: {e}")
 
-async def post_init(application):
-    """Inicializa o Telethon quando o bot inicia"""
-    if not client.is_connected():
-        await client.connect()
-    print("Telethon conectado!")
+    # Verifica quais contas estão autenticadas
+    contas_prontas = []
+    for nome, cliente in clientes.items():
+        try:
+            if cliente.is_connected() and await cliente.is_user_authorized():
+                contas_prontas.append((nome, cliente))
+        except:
+            pass
 
-async def post_shutdown(application):
-    """Desconecta o Telethon quando o bot para"""
-    if client.is_connected():
-        await client.disconnect()
-    print("Telethon desconectado!")
+    if not contas_prontas:
+        await update.message.reply_text("❌ Nenhuma conta autenticada. Use /login ou /login_todas primeiro.")
+        return
 
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
-    
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("login", login)],
-        states={
-            AGUARDANDO_CODIGO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_codigo)],
-            AGUARDANDO_SENHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_senha)],
-        },
-        fallbacks=[]
+    await update.message.reply_text(
+        f"🚀 Iniciando com {len(contas_prontas)} conta(s)...
+"
+        f"Origem: {origem_id}
+"
+        f"Destino: {destino_id}"
     )
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("adicionar", adicionar))
-    app.add_handler(conv_handler)
-    
-    print("Bot rodando...")
-    app.run_polling()
 
-if __name__ == "__main__":
-    main()
+    try:
+        # Usa a primeira conta para coletar membros
+        cliente_principal<response clipped><NOTE>Result is longer than **10000 characters**, will be **truncated**.</NOTE>
